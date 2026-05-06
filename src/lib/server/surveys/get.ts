@@ -1,6 +1,6 @@
 import { eq, desc, sql, asc } from 'drizzle-orm';
 import { db } from '../db';
-import { surveys, questions, responses } from '../schema';
+import { surveys, questions } from '../schema';
 
 export type QuestionPublic = {
   id: string;
@@ -127,6 +127,13 @@ export async function listUserSurveys(userId: string): Promise<UserSurveyListIte
   // дополнительный JOIN questions×responses (декартов источник для COUNT,
   // ленивая БД скрывала проблему). Скалярные подзапросы дают честный
   // count(*) на каждом пользователе и идут одним planом.
+  //
+  // ВАЖНО про корреляцию: drizzle для одно-табличного FROM (surveys)
+  // оптимизирует ссылки `${surveys.id}` в `sql\`\`` до неквалифицированного
+  // `"id"`. Внутри подзапроса PG резолвит такое `"id"` к колонке внутреннего
+  // FROM (questions.id / responses.id), а не к surveys.id — и получаем 0
+  // совпадений или ошибку. Поэтому пишем имена столбцов корреляции как
+  // литеральный SQL: `surveys.id` / `questions.survey_id` без интерполяции.
   const rows = await db
     .select({
       id: surveys.id,
@@ -136,12 +143,12 @@ export async function listUserSurveys(userId: string): Promise<UserSurveyListIte
       expiresAt: surveys.expiresAt,
       createdAt: surveys.createdAt,
       questionsCount: sql<number>`(
-        SELECT count(*)::int FROM ${questions} WHERE ${questions.surveyId} = ${surveys.id}
+        SELECT count(*)::int FROM questions WHERE questions.survey_id = surveys.id
       )`,
       responsesCount: sql<number>`(
-        SELECT count(*)::int FROM ${responses}
-        INNER JOIN ${questions} q ON q.id = ${responses.questionId}
-        WHERE q.survey_id = ${surveys.id}
+        SELECT count(*)::int FROM responses
+        INNER JOIN questions q ON q.id = responses.question_id
+        WHERE q.survey_id = surveys.id
       )`
     })
     .from(surveys)

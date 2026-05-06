@@ -17,10 +17,14 @@ SMTP_FROM=почта_отправителя
 # 4. Запуск Postgres + Redis
 npm run db:up
 
-# 5. Генерация миграций
-npm run db:generate
+# 5. Применение миграций
+# Миграции из drizzle/ уже в репо — генерировать заново не нужно.
 npm run db:migrate
 
 # 6. Запуск
 npm run dev
 ```
+
+> `npm run db:generate` запускайте только если меняете схему в `src/lib/server/schema.ts`.
+> На свежем чек-ауте он создаст дубликат миграции, которая конфликтует с baseline
+> (`type "answer_type" already exists`).
