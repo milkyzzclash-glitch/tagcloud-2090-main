@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { users } from '../schema';
-import { hashPassword, verifyPassword } from './hash';
+import { getDummyPasswordHash, hashPassword, verifyPassword } from './hash';
 import { createSession, type AuthUser } from './sessions';
 import { createVerificationToken, type VerificationToken } from './verification';
 import type { Credentials } from './validation';
@@ -82,11 +82,16 @@ export async function register(creds: Credentials): Promise<RegisterResult> {
 
 export async function login(creds: Credentials): Promise<LoginResult> {
   const [u] = await db.select().from(users).where(eq(users.email, creds.email)).limit(1);
-  if (!u || !u.passwordHash) {
-    return { ok: false, code: 'invalid_credentials', message: 'Неверный email или пароль' };
-  }
-  const ok = await verifyPassword(creds.password, u.passwordHash);
-  if (!ok) {
+
+  // Если пользователя нет (или это ghost без passwordHash), всё равно делаем
+  // bcrypt.compare с фейковым хэшем — это уравнивает время ответа для
+  // существующих/несуществующих email и не даёт enumeration через timing.
+  // bcrypt 11 rounds = ~80мс; «нашли — не нашли» при сравнении пары DB-вызовов
+  // отличались бы на эти же 80мс.
+  const hashToCheck = u?.passwordHash ?? (await getDummyPasswordHash());
+  const passwordOk = await verifyPassword(creds.password, hashToCheck);
+
+  if (!u || !u.passwordHash || !passwordOk) {
     return { ok: false, code: 'invalid_credentials', message: 'Неверный email или пароль' };
   }
   if (!u.emailVerified) {

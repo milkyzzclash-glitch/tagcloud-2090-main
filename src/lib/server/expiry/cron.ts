@@ -5,6 +5,7 @@ import { processExpired } from './process';
 import { purgeExpiredSessions } from '../auth/sessions';
 import { purgeExpiredVerificationTokens } from '../auth/verification';
 import { notifyUserSurveyStatus } from '../realtime/broadcast';
+import { mapWithLimit } from '../util/concurrency';
 import { log, withLogContext } from '../log';
 
 // 5 секунд: компромисс между нагрузкой и UX. claimBatch — это один
@@ -21,6 +22,12 @@ const BATCH = 20;
 const STUCK_EXPIRED_THRESHOLD_MS = 5 * 60_000;
 // Чистим протухшие сессии раз в час, чтобы таблица sessions не росла бесконечно.
 const SESSION_PURGE_INTERVAL_MS = 60 * 60_000;
+// Сколько survey-ев обрабатываем одновременно. processExpired блокируется на
+// SMTP (≈500–1500мс) — последовательно один батч из 20 опросов занимал бы
+// ~10–30с, и следующий тик копил отставание. Параллелизм 3 даёт ~3–5x
+// ускорение и не перегружает Piscina (RENDER_CONCURRENCY=4 на опрос ×
+// 3 опроса = 12 рендеров в очереди, пулу из 4 воркеров — терпимо).
+const PROCESS_CONCURRENCY = 3;
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let scanning = false;
@@ -72,13 +79,15 @@ async function scan(): Promise<void> {
     const claimed = await claimBatch(now, stuckThreshold);
     if (claimed.length > 0) {
       log.info('cron_claimed_surveys', { count: claimed.length });
+      // Push промежуточного 'expired' делаем сразу для всех в батче — это
+      // быстрая publish-команда в Redis, не имеет смысла откладывать до
+      // фактической обработки processExpired (она может занять ~1с).
       for (const s of claimed) {
-        // Push промежуточного статуса 'expired' владельцу: /my на
-        // других вкладках/девайсах сразу увидит «Истёк», даже если
-        // processExpired ещё крутит SMTP.
         notifyUserSurveyStatus(s.userId, s.code, 'expired');
-        await withLogContext({ surveyCode: s.code, surveyId: s.id }, () => processExpired(s));
       }
+      await mapWithLimit(claimed, PROCESS_CONCURRENCY, async (s) =>
+        withLogContext({ surveyCode: s.code, surveyId: s.id }, () => processExpired(s))
+      );
     }
 
     if (now.getTime() - lastSessionPurgeAt > SESSION_PURGE_INTERVAL_MS) {

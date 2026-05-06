@@ -26,6 +26,12 @@
   let ws: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let stopReconnect = false;
+  // reload guard: сервер шлёт `closed` на момент атомарного перехода
+  // active→expired, и если соединение мигнуло (или мы получили closed
+  // дважды из-за реконнекта), мы успевали поставить два setTimeout(reload)
+  // — первый делал перезагрузку, второй ловил уже новую страницу и снова
+  // её перезагружал, обнуляя SSR-данные.
+  let reloadScheduled = false;
 
   const activeQuestion = $derived(survey.questions[activeIdx] ?? survey.questions[0]);
   const activeWords = $derived(words[activeQuestion?.id] ?? []);
@@ -81,7 +87,10 @@
         } else if (msg.type === 'closed') {
           stopReconnect = true;
           ws?.close();
-          setTimeout(() => location.reload(), 250);
+          if (!reloadScheduled) {
+            reloadScheduled = true;
+            setTimeout(() => location.reload(), 250);
+          }
         }
       } catch {
         /* ignore */

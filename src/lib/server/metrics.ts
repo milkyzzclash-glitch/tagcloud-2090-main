@@ -122,8 +122,9 @@ export function incWsConnected(): void {
   wsConnectedGauge.inc();
 }
 
-export function decWsConnected(): void {
-  wsConnectedGauge.dec();
+export function decWsConnected(n: number = 1): void {
+  if (n <= 0) return;
+  wsConnectedGauge.dec(n);
 }
 
 export function observeRenderDuration(durationSec: number): void {
