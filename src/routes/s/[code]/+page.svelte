@@ -262,6 +262,7 @@
     </p>
   </div>
   <div class="title-actions">
+    <a class="btn btn-primary btn-sm" href={`/p/${survey.code}`}>Режим презентации</a>
     {#if isActive}
       {#if !confirmFinish}
         <button class="btn btn-danger btn-sm" onclick={() => (confirmFinish = true)}>

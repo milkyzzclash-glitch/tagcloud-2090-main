@@ -1,15 +1,9 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import type { PageProps } from './$types';
   let { data }: PageProps = $props();
 
   type Question = { text: string; answerType: 'single' | 'multi'; maxAnswers: number };
-  type CreateResult = {
-    code: string;
-    url: string;
-    dashboardUrl: string;
-    qrPngBase64: string;
-    expiresAt: string;
-  };
 
   let title = $state('');
   let caseSensitive = $state(false);
@@ -24,7 +18,6 @@
   let questions = $state<Question[]>([{ text: '', answerType: 'single', maxAnswers: 5 }]);
 
   let submitting = $state(false);
-  let result = $state<CreateResult | null>(null);
   let errorMessage = $state<string | null>(null);
 
   function addQuestion() {
@@ -94,256 +87,223 @@
         errorMessage = issue
           ? `${issue.path?.join('.') ?? ''}: ${issue.message}`
           : (data.error?.message ?? `Ошибка ${r.status}`);
+        submitting = false;
         return;
       }
-      result = data;
+      // Сразу уходим в режим презентации: код, ссылка и QR показаны
+      // там вертикальным блоком справа, а слева — реалтайм-облако.
+      // submitting не сбрасываем — кнопку и так уберёт навигация,
+      // а ранний сброс приводит к мерцанию состояния.
+      await goto(`/p/${data.code}`);
     } catch (e) {
       errorMessage = (e as Error).message;
-    } finally {
       submitting = false;
     }
-  }
-
-  let copyDoneCode = $state(false);
-
-  async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      copyDoneCode = true;
-      setTimeout(() => (copyDoneCode = false), 1500);
-    } catch {}
   }
 </script>
 
 <svelte:head><title>Новый опрос — Облако тегов 2090</title></svelte:head>
 
-{#if result}
-  <h1>Опрос создан</h1>
+<h1>Создать опрос</h1>
+<p class="muted">Результаты придут на <strong>{data.email}</strong> по истечении срока.</p>
 
-  <section class="card share">
-    <div class="share-info">
-      <h2 class="share-h">Код опроса</h2>
-      <div class="big-code">{result.code}</div>
+<form
+  onsubmit={(e) => {
+    e.preventDefault();
+    submit();
+  }}
+>
+  <label>
+    <span>Название (необязательно)</span>
+    <input
+      class="input"
+      type="text"
+      bind:value={title}
+      maxlength="200"
+      placeholder="Опрос по математике"
+    />
+  </label>
 
-      <h2 class="share-h">Ссылка на опрос</h2>
-      <div class="link-row">
-        <code>{result.url}</code>
-        <button class="btn btn-ghost btn-sm" onclick={() => copy(result!.url)}>
-          {copyDoneCode ? 'Скопировано' : 'Копировать'}
+  <fieldset>
+    <legend>Срок действия</legend>
+    <div class="segmented" role="radiogroup" aria-label="Срок действия">
+      {#each [['1h', '1 час'], ['1d', '1 день'], ['7d', '1 неделя'], ['custom', 'Дата']] as [v, label] (v)}
+        <button
+          type="button"
+          class="seg"
+          class:active={durationPreset === v}
+          role="radio"
+          aria-checked={durationPreset === v}
+          onclick={() => (durationPreset = v as typeof durationPreset)}
+        >
+          {label}
         </button>
-      </div>
+      {/each}
     </div>
-    <img class="qr" src={result.qrPngBase64} alt="QR код" />
-  </section>
+    {#if durationPreset === 'custom'}
+      <input class="input" type="datetime-local" bind:value={customExpiresAt} required />
+    {/if}
+  </fieldset>
 
-  <!-- Правка №7: с экрана «Опрос создан» сразу можно открыть
-       публичный просмотр облака (как на «Спасибо!» из правки №2). -->
-  <div class="created-actions">
-    <a class="btn btn-primary" href={`/c/${result.code}`}>Посмотреть облако</a>
-    <a class="btn btn-ghost" href={result.dashboardUrl}>Перейти в дашборд</a>
-  </div>
-{:else}
-  <h1>Создать опрос</h1>
-  <p class="muted">Результаты придут на <strong>{data.email}</strong> по истечении срока.</p>
-
-  <form
-    onsubmit={(e) => {
-      e.preventDefault();
-      submit();
-    }}
-  >
-    <label>
-      <span>Название (необязательно)</span>
-      <input
-        class="input"
-        type="text"
-        bind:value={title}
-        maxlength="200"
-        placeholder="Опрос по математике"
-      />
-    </label>
-
-    <fieldset>
-      <legend>Срок действия</legend>
-      <div class="segmented" role="radiogroup" aria-label="Срок действия">
-        {#each [['1h', '1 час'], ['1d', '1 день'], ['7d', '1 неделя'], ['custom', 'Дата']] as [v, label] (v)}
-          <button
-            type="button"
-            class="seg"
-            class:active={durationPreset === v}
-            role="radio"
-            aria-checked={durationPreset === v}
-            onclick={() => (durationPreset = v as typeof durationPreset)}
-          >
-            {label}
-          </button>
-        {/each}
-      </div>
-      {#if durationPreset === 'custom'}
-        <input class="input" type="datetime-local" bind:value={customExpiresAt} required />
-      {/if}
-    </fieldset>
-
-    <fieldset>
-      <legend>Цветовая схема</legend>
-      <div class="segmented" role="radiogroup" aria-label="Цветовая схема">
-        {#each [['mono', 'Чёрно-белая'], ['random', 'Случайные цвета'], ['custom', 'Своя палитра (случайно)'], ['custom_gradient', 'Своя палитра (по популярности)']] as [v, label] (v)}
-          <button
-            type="button"
-            class="seg"
-            class:active={colorScheme === v}
-            role="radio"
-            aria-checked={colorScheme === v}
-            onclick={() => {
-              colorScheme = v as typeof colorScheme;
-              ensurePaletteForScheme(colorScheme);
-            }}
-          >
-            {label}
-          </button>
-        {/each}
-      </div>
-      {#if colorScheme === 'custom' || colorScheme === 'custom_gradient'}
-        <div class="palette">
-          {#if colorScheme === 'custom_gradient'}
-            <p class="hint">
-              Минимум 2 цвета: первый — для самого редкого ответа, последний — для самого
-              популярного. Промежуточные цвета задают многосегментный градиент.
-            </p>
-          {/if}
-          {#each customPalette as _, i (i)}
-            <div class="swatch">
-              <input type="color" bind:value={customPalette[i]} aria-label="Цвет" />
-              <input
-                class="input swatch-hex"
-                type="text"
-                bind:value={customPalette[i]}
-                pattern="^#[0-9A-Fa-f]{'{6}'}$"
-                aria-label="HEX-код"
-              />
-              <button
-                type="button"
-                class="btn btn-ghost btn-sm swatch-remove"
-                onclick={() => removeColor(i)}
-                disabled={customPalette.length === 1 ||
-                  (colorScheme === 'custom_gradient' && customPalette.length === 2)}
-                aria-label="Удалить цвет"
-              >
-                ×
-              </button>
-            </div>
-          {/each}
-          {#if customPalette.length < 10}
-            <button type="button" class="btn btn-ghost btn-sm" onclick={addColor}>
-              + Добавить цвет ({customPalette.length}/10)
-            </button>
-          {/if}
-          {#if colorScheme === 'custom_gradient' && customPalette.length >= 2}
-            <div
-              class="gradient-preview"
-              style={`background: linear-gradient(to right, ${customPalette.join(', ')});`}
-              aria-hidden="true"
-            ></div>
-          {/if}
-        </div>
-      {/if}
-    </fieldset>
-
-    <fieldset>
-      <legend>Параметры облака</legend>
-      <label class="max-words">
-        <span class="max-words-label">Максимум слов в облаке</span>
-        <input
-          class="input max-words-input"
-          type="number"
-          min="1"
-          max="200"
-          step="1"
-          inputmode="numeric"
-          bind:value={maxWords}
-          required
-        />
-      </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={allowVertical} />
-        <span>Допускать вертикальную ориентацию</span>
-      </label>
-    </fieldset>
-
-    <fieldset>
-      <legend>Вопросы ({questions.length})</legend>
-      {#each questions as _, i (i)}
-        <div class="question">
-          <div class="q-head">
-            <strong>Вопрос {i + 1}</strong>
+  <fieldset>
+    <legend>Цветовая схема</legend>
+    <div class="segmented" role="radiogroup" aria-label="Цветовая схема">
+      {#each [['mono', 'Чёрно-белая'], ['random', 'Случайные цвета'], ['custom', 'Своя палитра (случайно)'], ['custom_gradient', 'Своя палитра (по популярности)']] as [v, label] (v)}
+        <button
+          type="button"
+          class="seg"
+          class:active={colorScheme === v}
+          role="radio"
+          aria-checked={colorScheme === v}
+          onclick={() => {
+            colorScheme = v as typeof colorScheme;
+            ensurePaletteForScheme(colorScheme);
+          }}
+        >
+          {label}
+        </button>
+      {/each}
+    </div>
+    {#if colorScheme === 'custom' || colorScheme === 'custom_gradient'}
+      <div class="palette">
+        {#if colorScheme === 'custom_gradient'}
+          <p class="hint">
+            Минимум 2 цвета: первый — для самого редкого ответа, последний — для самого популярного.
+            Промежуточные цвета задают многосегментный градиент.
+          </p>
+        {/if}
+        {#each customPalette as _, i (i)}
+          <div class="swatch">
+            <input type="color" bind:value={customPalette[i]} aria-label="Цвет" />
+            <input
+              class="input swatch-hex"
+              type="text"
+              bind:value={customPalette[i]}
+              pattern="^#[0-9A-Fa-f]{'{6}'}$"
+              aria-label="HEX-код"
+            />
             <button
               type="button"
-              class="btn btn-ghost btn-sm"
-              onclick={() => removeQuestion(i)}
-              disabled={questions.length === 1}
-              aria-label="Удалить вопрос"
+              class="btn btn-ghost btn-sm swatch-remove"
+              onclick={() => removeColor(i)}
+              disabled={customPalette.length === 1 ||
+                (colorScheme === 'custom_gradient' && customPalette.length === 2)}
+              aria-label="Удалить цвет"
             >
               ×
             </button>
           </div>
-          <textarea
-            class="input"
-            bind:value={questions[i].text}
-            required
-            maxlength="500"
-            placeholder="Опишите одним словом ваше настроение"
-          ></textarea>
-          <div class="segmented" role="radiogroup" aria-label="Тип ответа">
-            {#each [['single', 'Одно слово'], ['multi', 'Несколько слов']] as [v, label] (v)}
-              <button
-                type="button"
-                class="seg seg-sm"
-                class:active={questions[i].answerType === v}
-                role="radio"
-                aria-checked={questions[i].answerType === v}
-                onclick={() => setAnswerType(i, v as 'single' | 'multi')}
-              >
-                {label}
-              </button>
-            {/each}
-          </div>
-          {#if questions[i].answerType === 'multi'}
-            <label class="max-answers">
-              <span class="max-answers-label">Максимум ответов</span>
-              <input
-                class="input max-answers-input"
-                type="number"
-                min="1"
-                max="200"
-                step="1"
-                inputmode="numeric"
-                bind:value={questions[i].maxAnswers}
-                required
-              />
-            </label>
-          {/if}
-        </div>
-      {/each}
-      <button type="button" class="btn btn-ghost" onclick={addQuestion}> + Добавить вопрос </button>
-    </fieldset>
-
-    <details class="advanced">
-      <summary>Дополнительно</summary>
-      <label class="check">
-        <input type="checkbox" bind:checked={caseSensitive} />
-        <span>Учитывать регистр (Россия и россия — разные слова)</span>
-      </label>
-    </details>
-
-    {#if errorMessage}
-      <div class="alert alert-error">{errorMessage}</div>
+        {/each}
+        {#if customPalette.length < 10}
+          <button type="button" class="btn btn-ghost btn-sm" onclick={addColor}>
+            + Добавить цвет ({customPalette.length}/10)
+          </button>
+        {/if}
+        {#if colorScheme === 'custom_gradient' && customPalette.length >= 2}
+          <div
+            class="gradient-preview"
+            style={`background: linear-gradient(to right, ${customPalette.join(', ')});`}
+            aria-hidden="true"
+          ></div>
+        {/if}
+      </div>
     {/if}
+  </fieldset>
 
-    <button type="submit" class="btn btn-primary btn-lg" disabled={submitting}>
-      {submitting ? 'Создаём…' : 'Создать опрос'}
-    </button>
-  </form>
-{/if}
+  <fieldset>
+    <legend>Параметры облака</legend>
+    <label class="max-words">
+      <span class="max-words-label">Максимум слов в облаке</span>
+      <input
+        class="input max-words-input"
+        type="number"
+        min="1"
+        max="200"
+        step="1"
+        inputmode="numeric"
+        bind:value={maxWords}
+        required
+      />
+    </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={allowVertical} />
+      <span>Допускать вертикальную ориентацию</span>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Вопросы ({questions.length})</legend>
+    {#each questions as _, i (i)}
+      <div class="question">
+        <div class="q-head">
+          <strong>Вопрос {i + 1}</strong>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            onclick={() => removeQuestion(i)}
+            disabled={questions.length === 1}
+            aria-label="Удалить вопрос"
+          >
+            ×
+          </button>
+        </div>
+        <textarea
+          class="input"
+          bind:value={questions[i].text}
+          required
+          maxlength="500"
+          placeholder="Опишите одним словом ваше настроение"
+        ></textarea>
+        <div class="segmented" role="radiogroup" aria-label="Тип ответа">
+          {#each [['single', 'Одно слово'], ['multi', 'Несколько слов']] as [v, label] (v)}
+            <button
+              type="button"
+              class="seg seg-sm"
+              class:active={questions[i].answerType === v}
+              role="radio"
+              aria-checked={questions[i].answerType === v}
+              onclick={() => setAnswerType(i, v as 'single' | 'multi')}
+            >
+              {label}
+            </button>
+          {/each}
+        </div>
+        {#if questions[i].answerType === 'multi'}
+          <label class="max-answers">
+            <span class="max-answers-label">Максимум ответов</span>
+            <input
+              class="input max-answers-input"
+              type="number"
+              min="1"
+              max="200"
+              step="1"
+              inputmode="numeric"
+              bind:value={questions[i].maxAnswers}
+              required
+            />
+          </label>
+        {/if}
+      </div>
+    {/each}
+    <button type="button" class="btn btn-ghost" onclick={addQuestion}> + Добавить вопрос </button>
+  </fieldset>
+
+  <details class="advanced">
+    <summary>Дополнительно</summary>
+    <label class="check">
+      <input type="checkbox" bind:checked={caseSensitive} />
+      <span>Учитывать регистр (Россия и россия — разные слова)</span>
+    </label>
+  </details>
+
+  {#if errorMessage}
+    <div class="alert alert-error">{errorMessage}</div>
+  {/if}
+
+  <button type="submit" class="btn btn-primary btn-lg" disabled={submitting}>
+    {submitting ? 'Создаём…' : 'Создать опрос'}
+  </button>
+</form>
 
 <style>
   h1 {
@@ -517,69 +477,8 @@
     border: 1px solid var(--c-border);
     margin-top: var(--space-2);
   }
-  .created-actions {
-    display: flex;
-    gap: var(--space-3);
-    margin-top: var(--space-4);
-    flex-wrap: wrap;
-  }
   .q-head strong {
     font-weight: 500;
-  }
-
-  /* ─── Результат ──────────────────────── */
-  .share {
-    display: flex;
-    gap: var(--space-6);
-    flex-wrap: wrap;
-    align-items: flex-start;
-    padding: var(--space-6);
-  }
-  .share-info {
-    flex: 1;
-    min-width: 240px;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-  .share-h {
-    font-size: 0.75rem;
-    color: var(--c-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-    margin: 0 0 var(--space-1);
-  }
-  .big-code {
-    font-size: 2.25rem;
-    font-weight: 700;
-    color: var(--c-navy);
-    letter-spacing: 0.15em;
-    font-family: var(--font-mono);
-    margin-bottom: var(--space-4);
-  }
-  .link-row {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    margin-bottom: var(--space-4);
-  }
-  .link-row code {
-    padding: var(--space-2);
-    font-size: 0.875rem;
-    word-break: break-all;
-    line-height: 1.4;
-  }
-  .link-row .btn {
-    align-self: flex-start;
-  }
-  .qr {
-    width: 280px;
-    height: 280px;
-    image-rendering: pixelated;
-    border: 1px solid var(--c-border);
-    border-radius: var(--radius);
-    background: #fff;
   }
 
   /* ─── Дополнительно ──────────────────────── */
@@ -625,17 +524,6 @@
   @media (max-width: 640px) {
     .seg {
       flex-basis: calc(50% - 4px);
-    }
-    .share {
-      flex-direction: column-reverse;
-      align-items: center;
-    }
-    .share-info {
-      width: 100%;
-    }
-    .qr {
-      width: 240px;
-      height: 240px;
     }
   }
 </style>
