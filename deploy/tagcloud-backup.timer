@@ -1,0 +1,12 @@
+[Unit]
+Description=Run tagcloud postgres backup daily
+
+[Timer]
+# Каждый день в 03:30 UTC. Persistent=true гарантирует прогон, даже если
+# машина была выключена в это время.
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

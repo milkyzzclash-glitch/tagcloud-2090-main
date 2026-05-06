@@ -1,0 +1,55 @@
+import { json } from '@sveltejs/kit';
+import { eq } from 'drizzle-orm';
+import { z } from 'zod';
+import { env } from '$env/dynamic/private';
+import { db } from '$lib/server/db';
+import { users } from '$lib/server/schema';
+import { createVerificationToken, VERIFICATION_TTL_HOURS } from '$lib/server/auth/verification';
+import { sendVerificationEmail } from '$lib/server/email/verification';
+import { checkAuthRateLimit } from '$lib/server/voting/rate-limit';
+import { log } from '$lib/server/log';
+import type { RequestHandler } from './$types';
+
+const Body = z.object({ email: z.string().email().max(254) });
+
+/**
+ * Переотправка verification-ссылки. Отвечает 202 в любом случае, чтобы
+ * атакующий не мог по разнице ответов перебирать зарегистрированные email'ы.
+ * Реальная отправка (и логирование ошибки SMTP) происходит только если
+ * пользователь существует, имеет пароль (НЕ ghost) и ещё не подтверждён.
+ */
+export const POST: RequestHandler = async ({ request, url, getClientAddress }) => {
+  const raw = await request.json().catch(() => null);
+  const parsed = Body.safeParse(raw);
+  if (!parsed.success) {
+    return json({ error: { code: 'invalid_input', issues: parsed.error.issues } }, { status: 400 });
+  }
+
+  const rl = await checkAuthRateLimit(getClientAddress(), parsed.data.email);
+  if (!rl.allowed) {
+    return json(
+      { error: { code: 'rate_limited', message: 'Слишком много попыток, попробуйте позже' } },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfterSec) } }
+    );
+  }
+
+  const [u] = await db.select().from(users).where(eq(users.email, parsed.data.email)).limit(1);
+
+  if (u && u.passwordHash && !u.emailVerified) {
+    const v = await createVerificationToken(u.id, u.email);
+    const baseUrl = env.PUBLIC_BASE_URL || env.ORIGIN || url.origin;
+    try {
+      await sendVerificationEmail({
+        to: u.email,
+        verifyUrl: `${baseUrl}/verify?t=${v.token}`,
+        ttlHours: VERIFICATION_TTL_HOURS
+      });
+    } catch (err) {
+      log.error('resend_verification_send_failed', {
+        err: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  return json({ ok: true, ttlHours: VERIFICATION_TTL_HOURS }, { status: 202 });
+};

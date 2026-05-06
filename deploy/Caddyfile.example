@@ -1,0 +1,111 @@
+# Caddyfile для reverse-proxy перед Node-инстансом tagcloud.
+#
+# Использование:
+#   1. Скопировать в /etc/caddy/Caddyfile (или включить через `import`).
+#   2. Заменить yourdomain.tld на реальный домен.
+#   3. Если домена ещё нет — оставить блок `:80` ниже для тестов по IP.
+#   4. systemctl reload caddy.
+#
+# Caddy автоматически выпустит и обновит TLS-сертификат через Let's Encrypt
+# (HTTP-01) при первом обращении к домену с публичного IP.
+
+{
+	# Глобальные настройки. ACME email обязателен для production.
+	email admin@yourdomain.tld
+
+	# Логи в журнал systemd (journalctl -u caddy).
+	log {
+		output stderr
+		format console
+		level INFO
+	}
+}
+
+yourdomain.tld {
+	# Каталог для статических ассетов SvelteKit (если выносить из Node).
+	# Пока всё отдаёт сам Node — раскомментируйте, когда захочется снять с него
+	# нагрузку на отдачу /_app/* и фавиконки.
+	# root * /opt/tagcloud/build/client
+	# file_server
+
+	# Главное: проксируем всё на Node. Caddy сам апгрейдит ws:// → wss://.
+	#
+	# Для multi-instance (см. deploy/README.md "Профиль multi-instance"):
+	# заменить `127.0.0.1:3000` на список upstream'ов и добавить `lb_policy`.
+	# Пример для 4 инстансов:
+	#   reverse_proxy 127.0.0.1:3001 127.0.0.1:3002 127.0.0.1:3003 127.0.0.1:3004 {
+	#       lb_policy ip_hash         # WS sticky: один IP всегда на один upstream
+	#       health_uri /readyz
+	#       health_interval 5s
+	#       health_timeout 2s
+	#       fail_duration 30s
+	#       …заголовки и transport ниже…
+	#   }
+	reverse_proxy 127.0.0.1:3000 {
+		# WebSocket-апгрейд работает из коробки; явно указываем заголовки,
+		# чтобы getClientAddress() в SvelteKit видел реальный IP клиента.
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		# Долгоиграющие WS — увеличим read/write таймауты по умолчанию.
+		transport http {
+			read_timeout 1h
+			write_timeout 1h
+		}
+	}
+
+	# /metrics — только из локалки/мониторинга. Если METRICS_TOKEN задан в
+	# tagcloud.env, бэкенд проверит его сам; этот ACL — второй слой защиты.
+	@metrics path /metrics
+	@metrics_internal {
+		path /metrics
+		remote_ip 127.0.0.1 ::1 10.0.0.0/8 192.168.0.0/16 172.16.0.0/12
+	}
+	handle @metrics {
+		# По умолчанию — наружу не пускаем. Раскомментируйте `respond 403` ниже
+		# и `handle @metrics_internal` отдельно, если хотите явный allow-list.
+		respond 403
+	}
+	# handle @metrics_internal {
+	# 	reverse_proxy 127.0.0.1:3000
+	# }
+
+	# Security-заголовки. Дополняют SvelteKit-CSP (она ставится в HTML-ответе),
+	# здесь лежат HTTP-only заголовки, которые проще централизовать на edge.
+	header {
+		# HSTS на 1 год + preload-кандидат. Включайте preload только когда
+		# уверены, что весь домен и поддомены готовы к HTTPS навсегда.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		# Запрет MIME-sniffing (XSS через картинки/csv).
+		X-Content-Type-Options "nosniff"
+
+		# Запрет встраивания в iframe — у нас нет легитимного use-case'а.
+		X-Frame-Options "DENY"
+
+		# Минимум утечки реферера на внешние ссылки.
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# Отключаем мощные браузерные API, которыми проект не пользуется.
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+
+		# Снимаем заголовок Server, чтобы не светить версию Caddy.
+		-Server
+	}
+
+	# Health-checks без логирования (иначе журнал заполняется пробами).
+	@healthz path /healthz /readyz
+	log_skip @healthz
+
+	# Доп. защита: запрещаем доступ к чувствительным путям (если кто-то
+	# случайно положит .env / .git в корень).
+	@hidden path /.env /.git/*
+	respond @hidden 404
+}
+
+# Опционально: HTTP-доступ по IP без TLS — только для разработки/первичной
+# проверки. На production удалите этот блок.
+# :80 {
+# 	reverse_proxy 127.0.0.1:3000
+# }

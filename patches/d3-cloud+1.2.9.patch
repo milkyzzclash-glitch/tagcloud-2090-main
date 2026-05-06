@@ -1,0 +1,152 @@
+diff --git a/node_modules/d3-cloud/build/d3.layout.cloud.js b/node_modules/d3-cloud/build/d3.layout.cloud.js
+index 36071a5..9df55b9 100644
+--- a/node_modules/d3-cloud/build/d3.layout.cloud.js
++++ b/node_modules/d3-cloud/build/d3.layout.cloud.js
+@@ -104,6 +104,15 @@ module.exports = function() {
+     canvas.height = ch / ratio;
+ 
+     context.fillStyle = context.strokeStyle = "red";
++    // textBaseline по умолчанию 'alphabetic' — глиф рисуется выше
++    // baseline (ascender) и чуть ниже (descender). Из-за этого центр
++    // глифа в sprite-маске оказывается смещён на ≈0.3*fontSize ВЫШЕ
++    // sprite center, тогда как при пользовательском рендере
++    // (textBaseline='middle') глиф визуально центрируется в (d.x,d.y).
++    // Этот рассинхрон позиций маски и рендера приводит к визуальным
++    // наложениям при `allowVertical=true` и крупных перепадах размеров.
++    // textBaseline='middle' приводит маску в соответствие с рендером.
++    context.textBaseline = "middle";
+ 
+     return {context, ratio};
+   }
+@@ -252,8 +261,9 @@ function cloudSprite(contextAndRatio, d, data, di) {
+     c.font = d.style + " " + d.weight + " " + ~~((d.size + 1) / ratio) + "px " + d.font;
+     const metrics = c.measureText(d.text);
+     const anchor = -Math.floor(metrics.width / 2);
+-    let w = (metrics.width + 1) * ratio;
+-    let h = d.size << 1;
++    const pad2 = (d.padding || 0) * 2 * ratio;
++    let w = (metrics.width + 1) * ratio + pad2;
++    let h = (d.size << 1) + pad2;
+     if (d.rotate) {
+       var sr = Math.sin(d.rotate * RADIANS),
+           cr = Math.cos(d.rotate * RADIANS),
+@@ -302,24 +312,39 @@ function cloudSprite(contextAndRatio, d, data, di) {
+     x = d.xoff;
+     if (x == null) return;
+     y = d.yoff;
++    // ВАЖНО: исходный d3-cloud использовал общий `seen`, который никогда не
++    // сбрасывался. Из-за этого пустые строки СНИЗУ (которые остаются после
++    // textBaseline='middle' с h = 2*size + pad2) попадали в bbox: seenRow
++    // обновлялся даже на пустых строках после первой непустой. В итоге
++    // sprite-маска оказывалась НИЖЕ глифа на десятки пикселей, и слова,
++    // ставящиеся СВЕРХУ от текущего, не видели коллизию через маску, хотя
++    // глифы визуально пересекались.
++    //
++    // Чиним по-другому: трекаем `rowSeen` ПО СТРОКЕ — обновляем seenRow
++    // только когда в строке есть хоть один пиксель. Тогда пустые строки
++    // снизу не попадают в bbox, маска становится симметричной относительно
++    // глифа (т.к. textBaseline='middle' уже центрирует глиф в спрайте).
+     var seen = 0,
+         seenRow = -1;
+     for (var j = 0; j < h; j++) {
++      var rowSeen = 0;
+       for (var i = 0; i < w; i++) {
+         var k = w32 * j + (i >> 5),
+             m = pixels[((y + j) * (cw << 5) + (x + i)) << 2] ? 1 << (31 - (i % 32)) : 0;
+         sprite[k] |= m;
+-        seen |= m;
++        rowSeen |= m;
+       }
+-      if (seen) seenRow = j;
+-      else {
++      if (rowSeen) {
++        seen = 1;
++        seenRow = j;
++      } else if (!seen) {
+         d.y0++;
+         h--;
+         j--;
+         y++;
+       }
+     }
+-    d.y1 = d.y0 + seenRow;
++    d.y1 = d.y0 + seenRow + 1;
+     d.sprite = sprite.slice(0, (d.y1 - d.y0) * w32);
+   }
+ }
+diff --git a/node_modules/d3-cloud/index.js b/node_modules/d3-cloud/index.js
+index c015611..bd9e956 100644
+--- a/node_modules/d3-cloud/index.js
++++ b/node_modules/d3-cloud/index.js
+@@ -103,6 +103,15 @@ module.exports = function() {
+     canvas.height = ch / ratio;
+ 
+     context.fillStyle = context.strokeStyle = "red";
++    // textBaseline по умолчанию 'alphabetic' — глиф рисуется выше
++    // baseline (ascender) и чуть ниже (descender). Из-за этого центр
++    // глифа в sprite-маске оказывается смещён на ≈0.3*fontSize ВЫШЕ
++    // sprite center, тогда как при пользовательском рендере
++    // (textBaseline='middle') глиф визуально центрируется в (d.x,d.y).
++    // Этот рассинхрон позиций маски и рендера приводит к визуальным
++    // наложениям при `allowVertical=true` и крупных перепадах размеров.
++    // textBaseline='middle' приводит маску в соответствие с рендером.
++    context.textBaseline = "middle";
+ 
+     return {context, ratio};
+   }
+@@ -251,8 +260,9 @@ function cloudSprite(contextAndRatio, d, data, di) {
+     c.font = d.style + " " + d.weight + " " + ~~((d.size + 1) / ratio) + "px " + d.font;
+     const metrics = c.measureText(d.text);
+     const anchor = -Math.floor(metrics.width / 2);
+-    let w = (metrics.width + 1) * ratio;
+-    let h = d.size << 1;
++    const pad2 = (d.padding || 0) * 2 * ratio;
++    let w = (metrics.width + 1) * ratio + pad2;
++    let h = (d.size << 1) + pad2;
+     if (d.rotate) {
+       var sr = Math.sin(d.rotate * RADIANS),
+           cr = Math.cos(d.rotate * RADIANS),
+@@ -301,24 +311,39 @@ function cloudSprite(contextAndRatio, d, data, di) {
+     x = d.xoff;
+     if (x == null) return;
+     y = d.yoff;
++    // ВАЖНО: исходный d3-cloud использовал общий `seen`, который никогда не
++    // сбрасывался. Из-за этого пустые строки СНИЗУ (которые остаются после
++    // textBaseline='middle' с h = 2*size + pad2) попадали в bbox: seenRow
++    // обновлялся даже на пустых строках после первой непустой. В итоге
++    // sprite-маска оказывалась НИЖЕ глифа на десятки пикселей, и слова,
++    // ставящиеся СВЕРХУ от текущего, не видели коллизию через маску, хотя
++    // глифы визуально пересекались.
++    //
++    // Чиним по-другому: трекаем `rowSeen` ПО СТРОКЕ — обновляем seenRow
++    // только когда в строке есть хоть один пиксель. Тогда пустые строки
++    // снизу не попадают в bbox, маска становится симметричной относительно
++    // глифа (т.к. textBaseline='middle' уже центрирует глиф в спрайте).
+     var seen = 0,
+         seenRow = -1;
+     for (var j = 0; j < h; j++) {
++      var rowSeen = 0;
+       for (var i = 0; i < w; i++) {
+         var k = w32 * j + (i >> 5),
+             m = pixels[((y + j) * (cw << 5) + (x + i)) << 2] ? 1 << (31 - (i % 32)) : 0;
+         sprite[k] |= m;
+-        seen |= m;
++        rowSeen |= m;
+       }
+-      if (seen) seenRow = j;
+-      else {
++      if (rowSeen) {
++        seen = 1;
++        seenRow = j;
++      } else if (!seen) {
+         d.y0++;
+         h--;
+         j--;
+         y++;
+       }
+     }
+-    d.y1 = d.y0 + seenRow;
++    d.y1 = d.y0 + seenRow + 1;
+     d.sprite = sprite.slice(0, (d.y1 - d.y0) * w32);
+   }
+ }

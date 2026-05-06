@@ -1,0 +1,23 @@
+[Unit]
+Description=tagcloud postgres backup (pg_dump + restic)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tagcloud
+Group=tagcloud
+EnvironmentFile=/etc/tagcloud/backup.env
+ExecStart=/opt/tagcloud/scripts/ops/backup.sh
+
+# Hardening.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true

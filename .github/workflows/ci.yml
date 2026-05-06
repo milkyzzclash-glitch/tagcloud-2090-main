@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Отменяем устаревшие пуши в один и тот же PR/ветку, чтобы не жечь минуты
+# на промежуточные коммиты.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Type-check (svelte-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # canvas@3 требует нативные библиотеки cairo/pango для prebuild fallback.
+      # На ubuntu-latest @mapbox/node-pre-gyp обычно тянет prebuilt бинарь,
+      # но если версии разойдутся — апт-стейк гарантирует сборку из исходников.
+      - name: Install native canvas dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev pkg-config
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: svelte-check
+        run: npm run check
+
+  build:
+    name: Production build (vite SSR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Заглушки нужны только для того, чтобы модули $lib/server/db.ts и
+    # $lib/server/redis.ts не бросали при загрузке во время SSR-analyse.
+    # Реальное соединение в build-фазе не открывается.
+    env:
+      DATABASE_URL: postgres://stub:stub@localhost:5432/stub
+      REDIS_URL: redis://localhost:6379
+      PUBLIC_BASE_URL: http://localhost:5173
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install native canvas dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev pkg-config
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+  lint:
+    name: Lint (ESLint + Prettier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      # `--ignore-scripts` пропускает postinstall canvas/bcrypt — нативные
+      # либы здесь не нужны (lint работает с исходниками).
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      # tsconfig.json extends `./.svelte-kit/tsconfig.json`, который генерится
+      # `svelte-kit sync`. Без него tsconfig-парсеры (typescript-eslint,
+      # vite-node) падают с "Cannot find module './.svelte-kit/tsconfig.json'".
+      - name: Generate SvelteKit types
+        run: npx svelte-kit sync
+      - name: ESLint + Prettier
+        run: npm run lint
+
+  test:
+    name: Unit tests (vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Generate SvelteKit types
+        run: npx svelte-kit sync
+      - name: Run vitest
+        run: npm test
+
+  audit:
+    name: npm audit (high+ severity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      # Падаем только на high/critical: low/moderate в транзитивных зависимостях
+      # обычно требуют отдельного триажа, не хочется блокировать каждый PR.
+      - name: npm audit --audit-level=high
+        run: npm audit --audit-level=high --omit=dev

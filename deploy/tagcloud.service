@@ -1,0 +1,70 @@
+# systemd unit для tagcloud (Node SvelteKit + adapter-node).
+#
+# Установка:
+#   sudo cp deploy/tagcloud.service /etc/systemd/system/tagcloud.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tagcloud
+#
+# Логи: journalctl -u tagcloud -f
+#
+# Предполагается:
+#   - Сборка лежит в /opt/tagcloud/build (sveltekit build).
+#   - Конфиг в /etc/tagcloud/tagcloud.env (DATABASE_URL, REDIS_URL, SMTP_*).
+#   - Пользователь tagcloud существует (sudo useradd -r -s /usr/sbin/nologin tagcloud).
+
+[Unit]
+Description=tagcloud (SvelteKit, Node)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+# Если БД/Redis локальные — раскомментируйте, чтобы держать порядок старта:
+# Requires=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=tagcloud
+Group=tagcloud
+WorkingDirectory=/opt/tagcloud
+EnvironmentFile=/etc/tagcloud/tagcloud.env
+ExecStart=/usr/bin/node /opt/tagcloud/build/index.js
+
+# Restart-политика: при падении ждать 5 секунд и перезапускать. systemd сам
+# дросселирует через StartLimit*, чтобы не уйти в бесконечный crash-loop.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Graceful shutdown: hooks.server.ts ловит SIGTERM, флашит in-memory очередь
+# голосов и закрывает WS-комнаты. Дадим до 30с, иначе systemd убьёт SIGKILL.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Hardening (минимум, но эффективно).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/tagcloud
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=false   # node нужны JIT-страницы
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+# Лимиты ресурсов под одного процесса (для 1000 concurrent: см. Sprint 2 cluster).
+LimitNOFILE=65536
+
+# Размер пула libuv thread-pool. bcrypt и dns lookups блокируют поток —
+# при дефолтных 4 пик параллельных логинов упирается в очередь.
+# Перекрывается значением UV_THREADPOOL_SIZE из EnvironmentFile, если задано.
+Environment=UV_THREADPOOL_SIZE=16
+
+# Health-check: systemd >= 240 умеет dep на сторонний хелсчек, но проще
+# оставить это на reverse-proxy (Caddy использует /readyz).
+
+[Install]
+WantedBy=multi-user.target
