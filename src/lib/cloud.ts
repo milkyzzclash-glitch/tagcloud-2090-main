@@ -115,12 +115,17 @@ export function colorPicker(
     const p = palette;
     if (p.length === 1) return () => p[0];
 
-    const counts = (words ?? []).map(([, c]) => c);
+    // Один проход без промежуточного массива .map(...): для облака с 200+
+    // слов это сразу 200 аллокаций под counts + рост итератора, а нужны
+    // только две скалярные вершины распределения.
     let min = Infinity;
     let max = -Infinity;
-    for (const c of counts) {
-      if (c < min) min = c;
-      if (c > max) max = c;
+    if (words) {
+      for (let i = 0; i < words.length; i++) {
+        const c = words[i][1];
+        if (c < min) min = c;
+        if (c > max) max = c;
+      }
     }
     // На пустом/одинаковом наборе t всегда 0 — отдадим первый стоп,
     // чтобы UI не падал и не делил на ноль.
@@ -149,7 +154,14 @@ export function colorPicker(
 export const SIZE_MULTIPLIER = 5.5;
 
 export function weightFactor(words: CloudWord[], baseSize: number) {
-  const max = Math.max(1, ...words.map((w) => w[1]));
+  // Math.max(1, ...words.map(w => w[1])) выглядит лаконично, но делает две
+  // лишних операции: аллокацию массива длины N и spread, который
+  // материализует все N значений в стек. Для облака с большим хвостом
+  // это заметно: ручной цикл — один проход и ноль аллокаций.
+  let max = 1;
+  for (let i = 0; i < words.length; i++) {
+    if (words[i][1] > max) max = words[i][1];
+  }
   const denom = Math.log2(max + 1);
   return (count: number) => baseSize * (1 + (Math.log2(count + 1) / denom) * (SIZE_MULTIPLIER - 1));
 }
@@ -160,7 +172,10 @@ export function weightFactor(words: CloudWord[], baseSize: number) {
  * визуальную иерархию за счёт начертания дополнительно к размеру.
  */
 export function fontWeightFor(words: CloudWord[]): (count: number) => number {
-  const max = Math.max(1, ...words.map((w) => w[1]));
+  let max = 1;
+  for (let i = 0; i < words.length; i++) {
+    if (words[i][1] > max) max = words[i][1];
+  }
   const denom = Math.log2(max + 1);
   return (count) => {
     const t = Math.log2(count + 1) / denom; // 0..1

@@ -3,7 +3,7 @@ import { isValidCode } from '$lib/server/surveys/codes';
 import { SubmitAnswersSchema } from '$lib/server/voting/validation';
 import { validateSubmission } from '$lib/server/voting/validate';
 import { submitAnswers } from '$lib/server/voting/submit';
-import { checkRateLimit, hasVoted, markVoted } from '$lib/server/voting/rate-limit';
+import { checkRateLimit, releaseVote, tryClaimVote } from '$lib/server/voting/rate-limit';
 import type { RequestHandler } from './$types';
 
 function statusForError(code: string): number {
@@ -50,22 +50,29 @@ export const POST: RequestHandler = async ({ params, request, getClientAddress }
     return json({ error: { code: 'invalid_input', issues: parsed.error.issues } }, { status: 400 });
   }
 
-  if (await hasVoted(ip, code)) {
+  const v = await validateSubmission(code, parsed.data.answers);
+  if (!v.ok) {
+    return json({ error: v.error }, { status: statusForError(v.error.code) });
+  }
+
+  // Атомарный SET NX: одной командой проверяем «не голосовал ли этот IP» и
+  // занимаем слот. Раньше `hasVoted` + `markVoted` шли двумя командами — два
+  // параллельных запроса с одного IP проходили проверку и оба отправлялись в
+  // submitAnswers. Если SET NX вернул false — слот уже занят (повторный голос).
+  const claimed = await tryClaimVote(ip, code, v.survey.expiresAt);
+  if (!claimed) {
     return json(
       { error: { code: 'already_voted', message: 'Вы уже отправили ответ на этот опрос' } },
       { status: 409 }
     );
   }
 
-  const v = await validateSubmission(code, parsed.data.answers);
-  if (!v.ok) {
-    return json({ error: v.error }, { status: statusForError(v.error.code) });
-  }
-
   const submit = await submitAnswers(v.processed);
   if (!submit.ok) {
     // Buffer переполнен — БД/Redis в недоступности, дренаж не успевает.
-    // Не markVoted: клиент должен ретрайнуть позже, голос ещё не принят.
+    // Освобождаем уже занятый слот, чтобы клиент мог ретрайнуть; иначе
+    // следующий запрос упёрся бы в 409 «уже голосовали».
+    await releaseVote(ip, code);
     return json(
       {
         error: {
@@ -76,7 +83,6 @@ export const POST: RequestHandler = async ({ params, request, getClientAddress }
       { status: 503, headers: { 'Retry-After': '5' } }
     );
   }
-  await markVoted(ip, code, v.survey.expiresAt);
 
   return json({ ok: true, accepted: submit.accepted }, { status: 201 });
 };

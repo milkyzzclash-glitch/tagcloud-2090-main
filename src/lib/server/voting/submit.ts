@@ -19,6 +19,11 @@ const FLUSH_THRESHOLD = 100;
 // FLUSH_THRESHOLD; превышение → сервис отдаёт 503 в `/answer`, чтобы
 // клиент попробовал позже, пока не дренируется очередь.
 const MAX_BUFFER_SIZE = 100_000;
+// Чанк для bulk-INSERT'а: postgres-js по умолчанию имеет лимит ~65k параметров,
+// при batch > ~5k items × 3 поля параметрический предел нарушался → пакет
+// возвращался ошибкой и шёл по retry-петле. 1000 даёт 3000 параметров —
+// в 20 раз меньше предела, оставляет запас на дополнительные поля schema.
+const INSERT_CHUNK = 1000;
 // Fallback-TTL для агрегатов в Redis (`cloud:${questionId}`).
 // Первичная очистка — в `expiry/process.ts` после отправки email; этот TTL
 // нужен только чтобы данные не висели вечно, если процесс завершения не дошёл
@@ -26,17 +31,37 @@ const MAX_BUFFER_SIZE = 100_000;
 // разумный срок жизни опроса (UI ограничивает создание `expires_at` ближайшим
 // будущим, и cron форсит закрытие через ~5 мин после истечения).
 const CLOUD_KEY_TTL_SEC = 7 * 24 * 60 * 60;
+// Backoff после ошибки flush'а: первый ретрай через 200мс (FLUSH_INTERVAL_MS),
+// дальше — экспоненциально до 5с. Без backoff'а при «легла БД» цикл
+// retry × N ≈ 5/sec на воркер тратил CPU+коннект-pool впустую.
+const FLUSH_BACKOFF_BASE_MS = 200;
+const FLUSH_BACKOFF_MAX_MS = 5_000;
+// Сколько раз дренаж пробует пробить буфер на graceful shutdown. 5×500мс =
+// 2.5с — укладывается в типовой terminationGracePeriodSeconds=30.
+const SHUTDOWN_RETRIES = 5;
+const SHUTDOWN_RETRY_DELAY_MS = 500;
 
 const buffer: QueueItem[] = [];
 let timer: NodeJS.Timeout | null = null;
 let flushing = false;
+let consecutiveFailures = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function flush(): Promise<void> {
   if (flushing || buffer.length === 0) return;
   flushing = true;
   const batch = buffer.splice(0, buffer.length);
   try {
-    await db.insert(responses).values(batch);
+    // Чанкуем INSERT, чтобы не упереться в лимит параметров postgres-js.
+    // Чанки идут последовательно: rollback одного чанка не должен «терять»
+    // последующие — splice уже убрал items из буфера, при ошибке мы их
+    // целиком возвращаем в начало буфера через unshift ниже.
+    for (let i = 0; i < batch.length; i += INSERT_CHUNK) {
+      await db.insert(responses).values(batch.slice(i, i + INSERT_CHUNK));
+    }
     const pipeline = redis.pipeline();
     // Дедуплицируем questionId, чтобы EXPIRE вызывался один раз на ключ за
     // батч — это всё равно «sliding» TTL: каждый flush обновляет срок жизни.
@@ -51,16 +76,28 @@ async function flush(): Promise<void> {
     }
     await pipeline.exec();
     incVotesFlushed(batch.length, 'ok');
+    consecutiveFailures = 0;
   } catch (err) {
     // Возвращаем неотданный пакет в начало буфера, чтобы повторить попытку
     // на следующем тике — иначе голоса терялись бы при первой ошибке БД/Redis.
     buffer.unshift(...batch);
     incVotesFlushed(batch.length, 'failed');
-    log.error('voting_flush_failed', { batchSize: batch.length, err: String(err) });
+    consecutiveFailures++;
+    log.error('voting_flush_failed', {
+      batchSize: batch.length,
+      consecutiveFailures,
+      err: String(err)
+    });
   } finally {
     setVotesPending(buffer.length);
     flushing = false;
   }
+}
+
+function nextDelayMs(): number {
+  if (consecutiveFailures === 0) return FLUSH_INTERVAL_MS;
+  // Экспоненциальный backoff: 200ms × 2^(failures-1), кэп FLUSH_BACKOFF_MAX_MS.
+  return Math.min(FLUSH_BACKOFF_MAX_MS, FLUSH_BACKOFF_BASE_MS * 2 ** (consecutiveFailures - 1));
 }
 
 function scheduleFlush(): void {
@@ -69,7 +106,7 @@ function scheduleFlush(): void {
     timer = null;
     await flush();
     if (buffer.length > 0) scheduleFlush();
-  }, FLUSH_INTERVAL_MS);
+  }, nextDelayMs());
 }
 
 export type SubmitResult = { ok: true; accepted: number } | { ok: false; code: 'overloaded' };
@@ -117,10 +154,14 @@ export async function submitAnswers(processed: ProcessedAnswer[]): Promise<Submi
  * Дренирует in-memory очередь. Используется обработчиком сигналов
  * остановки процесса в `hooks.server.ts`, чтобы не терять голоса при
  * graceful shutdown (SIGTERM/SIGINT).
+ *
+ * Между попытками держим `SHUTDOWN_RETRY_DELAY_MS` пауз: если БД/Redis
+ * испытывают всплеск, повторное падение через 0мс не имеет смысла —
+ * скорее всего тот же таймаут.
  */
 export async function flushPending(): Promise<void> {
-  // Несколько попыток на случай, если первая упадёт и положит batch обратно.
-  for (let i = 0; i < 3 && buffer.length > 0; i++) {
+  for (let i = 0; i < SHUTDOWN_RETRIES && buffer.length > 0; i++) {
+    if (i > 0) await sleep(SHUTDOWN_RETRY_DELAY_MS);
     await flush();
   }
 }

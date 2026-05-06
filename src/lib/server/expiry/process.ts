@@ -7,8 +7,16 @@ import { buildSurveyCsv } from '../export/csv';
 import { sendResultsEmail, type EmailAttachment } from '../email/send';
 import { getLogoPng } from '../email/logo';
 import { notifyClosed, notifyUserSurveyStatus } from '../realtime/broadcast';
+import { mapWithLimit } from '../util/concurrency';
 import { redis } from '../redis';
 import { log } from '../log';
+
+// Лимит параллельных рендеров PNG для одного опроса. Worker-pool (Piscina)
+// сам по себе ограничен 4 потоками, и Promise.all без потолка просто
+// поставит остальные задачи в очередь воркера — но при этом мы держим
+// готовые буферы в памяти всё время рендера (10 PNG × ~150кб = ~1.5МБ
+// на один опрос). 4 матчит размер пула, не плодит ожидающих задач.
+const RENDER_CONCURRENCY = 4;
 
 /**
  * Удаляет агрегаты `cloud:${questionId}` из Redis. Вызывается ПОСЛЕ
@@ -59,19 +67,30 @@ export async function processExpired(survey: Survey): Promise<void> {
       });
     }
 
+    // Рендерим PNG параллельно с потолком: на опросах с 5+ непустыми
+    // вопросами раньше шёл sequential `await renderPng` → суммарно
+    // ~5 × 200мс = 1с. Параллельный пул из 4 воркеров укладывает то же
+    // в ~250–300мс (ограничено пулом Piscina).
+    type RenderJob = { idx: number; words: (typeof aggregated)[number]['topWords'] };
+    const jobs: RenderJob[] = [];
     for (let i = 0; i < aggregated.length; i++) {
       const a = aggregated[i];
-      // Inline-облака пропускаем для пустых вопросов — нечего показывать.
       if (a.totalVotes === 0) continue;
-      const png = await renderPng(a.topWords, survey.colorScheme, survey.customPalette, undefined, {
+      jobs.push({ idx: i, words: a.topWords });
+    }
+    const renders = await mapWithLimit(jobs, RENDER_CONCURRENCY, (job) =>
+      renderPng(job.words, survey.colorScheme, survey.customPalette, undefined, {
         maxWords: survey.maxWords,
         allowVertical: survey.allowVertical
-      });
+      })
+    );
+    for (let k = 0; k < jobs.length; k++) {
+      const idx = jobs[k].idx;
       attachments.push({
-        filename: `cloud_q${i + 1}.png`,
-        content: png,
+        filename: `cloud_q${idx + 1}.png`,
+        content: renders[k],
         contentType: 'image/png',
-        cid: `cloud_q${i + 1}`
+        cid: `cloud_q${idx + 1}`
       });
     }
 

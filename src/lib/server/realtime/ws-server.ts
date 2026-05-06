@@ -21,8 +21,12 @@ const wss = new WebSocketServer({ noServer: true });
 
 wss.on(
   'connection',
-  async (ws: WebSocket, _req: IncomingMessage, ctx: { code: string; questionIds: string[] }) => {
-    const room = getRoom(ctx.code, ctx.questionIds);
+  async (
+    ws: WebSocket,
+    _req: IncomingMessage,
+    ctx: { code: string; questionIds: string[]; maxWords: number }
+  ) => {
+    const room = getRoom(ctx.code, ctx.questionIds, ctx.maxWords);
     await addSubscriber(room, ws);
 
     ws.on('close', () => removeSubscriber(room, ws));
@@ -208,6 +212,10 @@ export async function handleUpgrade(
     .orderBy(questions.position);
 
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req, { code, questionIds: qs.map((q) => q.id) });
+    wss.emit('connection', ws, req, {
+      code,
+      questionIds: qs.map((q) => q.id),
+      maxWords: survey.maxWords
+    });
   });
 }

@@ -1,4 +1,4 @@
-import { eq, desc, sql, inArray, asc } from 'drizzle-orm';
+import { eq, desc, sql, asc } from 'drizzle-orm';
 import { db } from '../db';
 import { surveys, questions, responses } from '../schema';
 
@@ -122,32 +122,31 @@ export type UserSurveyListItem = {
 };
 
 export async function listUserSurveys(userId: string): Promise<UserSurveyListItem[]> {
+  // Один запрос вместо трёх: раньше шёл `select surveys` + `count questions`
+  // + `count responses`, и при росте списка опросов это давало 3 RTT и
+  // дополнительный JOIN questions×responses (декартов источник для COUNT,
+  // ленивая БД скрывала проблему). Скалярные подзапросы дают честный
+  // count(*) на каждом пользователе и идут одним planом.
   const rows = await db
-    .select()
+    .select({
+      id: surveys.id,
+      code: surveys.code,
+      title: surveys.title,
+      status: surveys.status,
+      expiresAt: surveys.expiresAt,
+      createdAt: surveys.createdAt,
+      questionsCount: sql<number>`(
+        SELECT count(*)::int FROM ${questions} WHERE ${questions.surveyId} = ${surveys.id}
+      )`,
+      responsesCount: sql<number>`(
+        SELECT count(*)::int FROM ${responses}
+        INNER JOIN ${questions} q ON q.id = ${responses.questionId}
+        WHERE q.survey_id = ${surveys.id}
+      )`
+    })
     .from(surveys)
     .where(eq(surveys.userId, userId))
     .orderBy(desc(surveys.createdAt));
-  if (rows.length === 0) return [];
-
-  const surveyIds = rows.map((s) => s.id);
-
-  const qCounts = await db
-    .select({ surveyId: questions.surveyId, cnt: sql<number>`count(*)::int` })
-    .from(questions)
-    .where(inArray(questions.surveyId, surveyIds))
-    .groupBy(questions.surveyId);
-  const qBy = new Map(qCounts.map((r) => [r.surveyId, r.cnt]));
-
-  const rCounts = await db
-    .select({
-      surveyId: questions.surveyId,
-      cnt: sql<number>`count(${responses.id})::int`
-    })
-    .from(questions)
-    .leftJoin(responses, eq(questions.id, responses.questionId))
-    .where(inArray(questions.surveyId, surveyIds))
-    .groupBy(questions.surveyId);
-  const rBy = new Map(rCounts.map((r) => [r.surveyId, r.cnt]));
 
   return rows.map((s) => ({
     code: s.code,
@@ -155,7 +154,7 @@ export async function listUserSurveys(userId: string): Promise<UserSurveyListIte
     status: s.status,
     expiresAt: s.expiresAt,
     createdAt: s.createdAt,
-    questionsCount: qBy.get(s.id) ?? 0,
-    responsesCount: rBy.get(s.id) ?? 0
+    questionsCount: s.questionsCount ?? 0,
+    responsesCount: s.responsesCount ?? 0
   }));
 }

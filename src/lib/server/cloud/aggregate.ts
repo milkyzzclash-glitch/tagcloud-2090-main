@@ -2,6 +2,21 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db';
 import type { CloudWord } from '$lib/types/cloud';
 
+type AggRow = { word: string; total: number };
+
+// drizzle-orm `db.execute(...)` отдаёт результат, форма которого зависит от
+// драйвера: `postgres-js` возвращает массив строк напрямую, у `pg`/`mysql2`
+// строки лежат в поле `rows`. Этот хелпер унифицирует доступ без `as unknown as`,
+// который скрывал тип и не давал TS поймать ошибки селекта (имя столбца, и т.п.).
+function asRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  if (result && typeof result === 'object' && 'rows' in result) {
+    const r = (result as { rows: unknown }).rows;
+    if (Array.isArray(r)) return r as T[];
+  }
+  return [];
+}
+
 /**
  * Считает топ-N слов по нормализованной форме для опроса.
  *
@@ -20,7 +35,7 @@ export async function aggregateQuestion(
   questionId: string,
   topN: number = 100
 ): Promise<CloudWord[]> {
-  const rows = await db.execute<{ word: string; total: number }>(sql`
+  const result = await db.execute<AggRow>(sql`
     WITH agg AS (
       SELECT word_norm, count(*)::int AS total
       FROM responses
@@ -46,11 +61,6 @@ export async function aggregateQuestion(
     ORDER BY a.total DESC
   `);
 
-  // postgres-js возвращает rows напрямую, drizzle-orm execute оборачивает.
-  // Учитываем оба варианта.
-  const list =
-    (rows as unknown as { rows?: Array<{ word: string; total: number }> }).rows ??
-    (rows as unknown as Array<{ word: string; total: number }>);
-
+  const list = asRows<AggRow>(result);
   return list.map((r) => [r.word, Number(r.total)] as CloudWord);
 }
