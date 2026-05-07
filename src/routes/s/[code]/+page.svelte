@@ -3,6 +3,7 @@
   import type { PageProps } from './$types';
   import type { CloudWord, ServerMsg } from '$lib/types/cloud';
   import { renderCloud } from '$lib/cloud-render';
+  import { copyOnClick } from '$lib/actions/copy-on-click';
 
   let { data }: PageProps = $props();
   const survey = $derived(data.survey);
@@ -143,23 +144,6 @@
       token.cancelled = true;
     };
   });
-
-  let copyDoneCode = $state(false);
-  let copyDoneLink = $state(false);
-  async function copyCode() {
-    try {
-      await navigator.clipboard.writeText(survey.code);
-      copyDoneCode = true;
-      setTimeout(() => (copyDoneCode = false), 1500);
-    } catch {}
-  }
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(respondentUrl);
-      copyDoneLink = true;
-      setTimeout(() => (copyDoneLink = false), 1500);
-    } catch {}
-  }
 
   function downloadPng() {
     if (!canvas) return;
@@ -330,24 +314,38 @@
     <div class="share-info">
       <div class="share-block">
         <h2 class="share-h">Код опроса</h2>
-        <div class="big-code-row">
-          <span class="big-code">{survey.code}</span>
-          <button class="btn btn-ghost btn-sm" onclick={copyCode}>
-            {copyDoneCode ? 'Скопировано' : 'Копировать'}
-          </button>
-        </div>
+        <span
+          class="big-code"
+          role="button"
+          tabindex="0"
+          use:copyOnClick={{ kind: 'text', text: survey.code }}
+        >
+          {survey.code}
+        </span>
       </div>
       <div class="share-block">
         <h2 class="share-h">Ссылка на опрос</h2>
-        <div class="link-row">
-          <span>{respondentUrl}</span>
-          <button class="btn btn-ghost btn-sm" onclick={copyLink}>
-            {copyDoneLink ? 'Скопировано' : 'Копировать'}
-          </button>
-        </div>
+        <span
+          class="link-text"
+          role="button"
+          tabindex="0"
+          title={respondentUrl}
+          use:copyOnClick={{ kind: 'text', text: respondentUrl }}
+        >
+          {respondentUrl}
+        </span>
       </div>
     </div>
-    <img class="qr" src={qrPngBase64Data} alt="QR код опроса" />
+    <img
+      class="qr"
+      src={qrPngBase64Data}
+      alt="QR код опроса"
+      use:copyOnClick={{
+        kind: 'image',
+        image: qrPngBase64Data,
+        fallbackText: respondentUrl
+      }}
+    />
   </section>
 {/if}
 
@@ -530,11 +528,26 @@
     font-weight: 600;
     margin: 0;
   }
-  .big-code-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    flex-wrap: wrap;
+  /* .big-code/.link-text/.qr — кликабельны через action copyOnClick;
+     visual hint и клик-цель совпадают, поэтому box-style + cursor:pointer
+     ставим прямо на сам элемент. Кнопок «Копировать» больше нет —
+     hover-tooltip действует как индикатор копируемости. */
+  .big-code,
+  .link-text {
+    user-select: none;
+    transition: background-color 120ms;
+    border-radius: var(--radius);
+    align-self: flex-start;
+    max-width: 100%;
+  }
+  .big-code:hover,
+  .link-text:hover {
+    background: rgba(14, 42, 92, 0.06);
+  }
+  .big-code:focus-visible,
+  .link-text:focus-visible {
+    outline: 2px solid var(--c-navy);
+    outline-offset: 2px;
   }
   .big-code {
     font-size: 2.25rem;
@@ -543,12 +556,21 @@
     letter-spacing: 0.15em;
     font-family: var(--font-mono);
     line-height: 1;
+    padding: var(--space-2);
+    word-break: break-all;
   }
-  .link-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
+  .link-text {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    color: var(--c-text);
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    padding: 8px 10px;
+    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .qr {
     width: 280px;
@@ -558,6 +580,10 @@
     border-radius: var(--radius);
     background: #fff;
     flex-shrink: 0;
+    transition: transform 120ms;
+  }
+  .qr:hover {
+    transform: scale(1.02);
   }
 
   /* ─── Облако ──────────────────── */

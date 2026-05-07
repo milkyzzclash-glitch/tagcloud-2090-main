@@ -3,6 +3,7 @@
   import type { PageProps } from './$types';
   import type { CloudWord, ServerMsg } from '$lib/types/cloud';
   import { renderCloud } from '$lib/cloud-render';
+  import { copyOnClick } from '$lib/actions/copy-on-click';
 
   let { data }: PageProps = $props();
   const survey = $derived(data.survey);
@@ -30,6 +31,14 @@
   const activeQuestion = $derived(survey.questions[activeIdx] ?? survey.questions[0]);
   const activeWords = $derived(words[activeQuestion?.id] ?? []);
   const totalVotes = $derived(activeWords.reduce((s, [, c]) => s + c, 0));
+
+  function votePlural(n: number): string {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return 'голос';
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'голоса';
+    return 'голосов';
+  }
 
   function connect(): void {
     if (typeof window === 'undefined') return;
@@ -103,23 +112,6 @@
     };
   });
 
-  let copyDoneCode = $state(false);
-  let copyDoneLink = $state(false);
-  async function copyCode() {
-    try {
-      await navigator.clipboard.writeText(survey.code);
-      copyDoneCode = true;
-      setTimeout(() => (copyDoneCode = false), 1500);
-    } catch {}
-  }
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(respondentUrl);
-      copyDoneLink = true;
-      setTimeout(() => (copyDoneLink = false), 1500);
-    } catch {}
-  }
-
   // Полноэкранный режим: для презентации в классе удобно убрать вкладку
   // и адресную строку. Используем стандартный Fullscreen API; при отказе
   // (Safari/iOS, no permission) просто игнорируем.
@@ -160,97 +152,110 @@
 <svelte:window onkeydown={onKeydown} />
 
 <!--
-  Режим презентации ломает обычный max-width=880px контейнер: облако
-  должно занимать всю доступную ширину. :global на .container
-  применяется только пока этот компонент смонтирован — Svelte снимает
-  стили вместе с unmount.
+  Режим презентации: облако — full-bleed на левой колонке, сайдбар
+  с реквизитами опроса прижат к правому краю окна (border-left, без
+  внешнего padding). Заголовок опроса, подсказка про стрелки и кнопки
+  копирования убраны: вкладки/текст вопроса/счётчик голосов выведены
+  оверлеем поверх облака; для копирования кода/ссылки/QR — hover-tooltip
+  («Скопировать» → «Скопировано»), action в $lib/actions/copy-on-click.
+
+  :global(main.container) сбрасывается только пока этот компонент
+  смонтирован — на остальных страницах сохраняется обычная ширина.
 -->
 <div class="presentation">
   <section class="cloud-area" aria-label="Облако ответов">
-    <header class="cloud-head">
-      <div class="title-block">
-        <h1>{survey.title ?? `Опрос ${survey.code}`}</h1>
-        {#if !isActive}
-          <span class="badge badge-muted">Завершён</span>
-        {/if}
+    <canvas bind:this={canvas} width="1600" height="900"></canvas>
+
+    {#if activeWords.length === 0}
+      <div class="empty">
+        {isActive
+          ? 'Пока нет ответов. Покажите QR-код или код опроса.'
+          : 'Голосов в этом опросе не было.'}
       </div>
-      <div class="cloud-actions">
-        <a class="btn btn-ghost btn-sm" href={`/s/${survey.code}`}>В дашборд</a>
-        <button type="button" class="btn btn-ghost btn-sm" onclick={toggleFullscreen}>
-          {isFullscreen ? 'Выйти из полного экрана' : 'Полный экран'}
-        </button>
-      </div>
-    </header>
+    {/if}
 
     {#if survey.questions.length > 1}
-      <nav class="tabs" aria-label="Переключение между вопросами">
+      <nav class="overlay tabs" aria-label="Переключение между вопросами">
         {#each survey.questions as q, i (q.id)}
           <button
             type="button"
             class="tab"
             class:active={i === activeIdx}
             onclick={() => (activeIdx = i)}
+            title={q.text}
           >
-            {i + 1}. {q.text.length > 40 ? q.text.slice(0, 40) + '…' : q.text}
+            {i + 1}
           </button>
         {/each}
       </nav>
     {/if}
 
-    <div class="active-question">{activeQuestion?.text}</div>
+    <div class="overlay question-text">{activeQuestion?.text}</div>
 
-    <div class="canvas-wrap">
-      {#if activeWords.length === 0}
-        <div class="empty">
-          {isActive
-            ? 'Пока нет ответов. Покажите QR-код или код опроса.'
-            : 'Голосов в этом опросе не было.'}
-        </div>
-      {/if}
-      <canvas bind:this={canvas} width="1600" height="900"></canvas>
+    <div class="overlay vote-count">
+      {totalVotes}
+      {votePlural(totalVotes)}
     </div>
 
-    <div class="footer-info">
-      <span>
-        {totalVotes}
-        {totalVotes === 1
-          ? 'голос'
-          : totalVotes >= 2 && totalVotes <= 4 && totalVotes % 100 < 12
-            ? 'голоса'
-            : 'голосов'}
-      </span>
-      {#if survey.questions.length > 1}
-        <span class="muted">← → переключение вопросов</span>
-      {/if}
+    <div class="overlay actions">
+      <a class="btn btn-ghost btn-sm" href={`/s/${survey.code}`}>В дашборд</a>
+      <button type="button" class="btn btn-ghost btn-sm" onclick={toggleFullscreen}>
+        {isFullscreen ? 'Свернуть' : 'Полный экран'}
+      </button>
     </div>
+
+    {#if !isActive}
+      <div class="overlay status-badge">
+        <span class="badge badge-muted">Опрос завершён</span>
+      </div>
+    {/if}
   </section>
 
   <aside class="share-side" aria-label="Реквизиты опроса">
     <div class="share-block">
       <h2 class="share-h">Код опроса</h2>
-      <div class="big-code">{survey.code}</div>
-      <button type="button" class="btn btn-ghost btn-sm" onclick={copyCode}>
-        {copyDoneCode ? 'Скопировано' : 'Копировать код'}
-      </button>
+      <div
+        class="big-code"
+        role="button"
+        tabindex="0"
+        use:copyOnClick={{ kind: 'text', text: survey.code }}
+      >
+        {survey.code}
+      </div>
     </div>
 
     <div class="share-block">
       <h2 class="share-h">Ссылка</h2>
-      <div class="link-text" title={respondentUrl}>{respondentUrl}</div>
-      <button type="button" class="btn btn-ghost btn-sm" onclick={copyLink}>
-        {copyDoneLink ? 'Скопировано' : 'Копировать ссылку'}
-      </button>
+      <div
+        class="link-text"
+        role="button"
+        tabindex="0"
+        title={respondentUrl}
+        use:copyOnClick={{ kind: 'text', text: respondentUrl }}
+      >
+        {respondentUrl}
+      </div>
     </div>
 
     <div class="share-block qr-block">
       <h2 class="share-h">QR-код</h2>
-      <img class="qr" src={qrPngBase64Data} alt="QR код опроса" />
+      <img
+        class="qr"
+        src={qrPngBase64Data}
+        alt="QR код опроса"
+        use:copyOnClick={{
+          kind: 'image',
+          image: qrPngBase64Data,
+          fallbackText: respondentUrl
+        }}
+      />
     </div>
   </aside>
 </div>
 
 <style>
-  /* Сброс контейнера root-layout: на /p/[code] нужно полное полотно. */
+  /* Полное полотно: убираем root-layout container и его padding,
+     чтобы сайдбар лёг ровно к правому краю viewport'а. */
   :global(main.container) {
     max-width: none;
     padding: 0;
@@ -260,85 +265,16 @@
   .presentation {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 320px;
-    gap: var(--space-6);
-    padding: var(--space-6);
     align-items: stretch;
     min-height: calc(100vh - 130px);
   }
 
-  /* ─── Левая колонка: облако ─────────────────────────── */
+  /* ─── Левая колонка: облако full-bleed ─────────────── */
   .cloud-area {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-  }
-  .cloud-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  .title-block {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-  h1 {
-    margin: 0;
-    font-size: 1.5rem;
-    color: var(--c-navy);
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .cloud-actions {
-    display: flex;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
-  .tabs {
-    display: flex;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
-  .tab {
-    background: transparent;
-    color: var(--c-muted);
-    border: 1px solid var(--c-border);
-    padding: 6px 12px;
-    border-radius: var(--radius);
-    font-family: inherit;
-    font-size: 0.9375rem;
-    cursor: pointer;
-    transition:
-      background-color 120ms,
-      color 120ms;
-  }
-  .tab:hover:not(.active) {
-    background: var(--c-surface);
-    color: var(--c-text);
-  }
-  .tab.active {
-    background: var(--c-navy);
-    color: white;
-    border-color: var(--c-navy);
-  }
-  .active-question {
-    font-weight: 500;
-    color: var(--c-text);
-    font-size: 1.125rem;
-  }
-  .canvas-wrap {
     position: relative;
-    flex: 1 1 auto;
-    min-height: 320px;
     background: #fff;
-    border: 1px solid var(--c-border);
-    border-radius: var(--radius);
     overflow: hidden;
+    min-width: 0;
   }
   canvas {
     width: 100%;
@@ -358,34 +294,102 @@
     padding: var(--space-4);
     font-size: 1.0625rem;
   }
-  .footer-info {
+
+  /* Overlay-элементы: position:absolute поверх canvas, z-index>0,
+     чтобы перекрывать .empty (z-index:1 → у overlay 2). */
+  .overlay {
+    position: absolute;
+    z-index: 2;
+  }
+  .tabs {
+    top: var(--space-4);
+    left: 50%;
+    transform: translateX(-50%);
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    color: var(--c-text);
+    gap: var(--space-1);
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding: 4px;
+    border-radius: var(--radius);
+    border: 1px solid var(--c-border);
+    box-shadow: var(--shadow-sm);
+  }
+  .tab {
+    background: transparent;
+    color: var(--c-muted);
+    border: 0;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-family: inherit;
     font-size: 0.9375rem;
-    padding-top: var(--space-1);
-    flex-wrap: wrap;
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      background-color 120ms,
+      color 120ms;
+    min-width: 36px;
+  }
+  .tab:hover:not(.active) {
+    background: var(--c-surface);
+    color: var(--c-text);
+  }
+  .tab.active {
+    background: var(--c-navy);
+    color: white;
+  }
+  .question-text {
+    top: var(--space-4);
+    left: var(--space-4);
+    max-width: min(60%, 720px);
+    font-weight: 500;
+    color: var(--c-text);
+    font-size: 1.0625rem;
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding: 8px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--c-border);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vote-count {
+    bottom: var(--space-4);
+    left: var(--space-4);
+    color: var(--c-text);
+    font-size: 1rem;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--c-border);
+    box-shadow: var(--shadow-sm);
+  }
+  .actions {
+    top: var(--space-4);
+    right: var(--space-4);
+    display: flex;
     gap: var(--space-2);
   }
-  .footer-info .muted {
-    color: var(--c-muted);
-    font-size: 0.8125rem;
+  .status-badge {
+    bottom: var(--space-4);
+    right: var(--space-4);
   }
 
-  /* ─── Правая колонка: вертикальный share-блок ────────── */
+  /* ─── Правая колонка: вертикальный sticky-блок ────── */
   .share-side {
     background: var(--c-surface);
-    border: 1px solid var(--c-border);
-    border-radius: var(--radius-lg);
+    border-left: 1px solid var(--c-border);
     padding: var(--space-5);
     display: flex;
     flex-direction: column;
     gap: var(--space-5);
-    align-self: start;
-    box-shadow: var(--shadow-sm);
-    position: sticky;
-    top: var(--space-4);
+    align-self: stretch;
   }
   .share-block {
     display: flex;
@@ -400,6 +404,21 @@
     font-weight: 600;
     margin: 0;
   }
+  .big-code,
+  .link-text {
+    user-select: none;
+    transition: background-color 120ms;
+    border-radius: var(--radius);
+  }
+  .big-code:hover,
+  .link-text:hover {
+    background: rgba(14, 42, 92, 0.06);
+  }
+  .big-code:focus-visible,
+  .link-text:focus-visible {
+    outline: 2px solid var(--c-navy);
+    outline-offset: 2px;
+  }
   .big-code {
     font-size: 2.25rem;
     font-weight: 700;
@@ -408,6 +427,7 @@
     font-family: var(--font-mono);
     line-height: 1;
     word-break: break-all;
+    padding: var(--space-2);
   }
   .link-text {
     font-family: var(--font-mono);
@@ -416,8 +436,10 @@
     word-break: break-all;
     background: var(--c-bg);
     padding: 8px 10px;
-    border-radius: var(--radius);
     border: 1px solid var(--c-border);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .qr-block {
     align-items: center;
@@ -430,25 +452,33 @@
     border: 1px solid var(--c-border);
     border-radius: var(--radius);
     background: #fff;
+    transition: transform 120ms;
+  }
+  .qr:hover {
+    transform: scale(1.02);
   }
 
-  /* ─── Адаптив ─────────────────────────────────────────── */
+  /* ─── Адаптив ─────────────────────────────────────── */
   @media (max-width: 960px) {
     .presentation {
       grid-template-columns: 1fr;
-      padding: var(--space-4);
-      gap: var(--space-4);
     }
     .share-side {
-      position: static;
+      border-left: 0;
+      border-top: 1px solid var(--c-border);
       order: 2;
     }
     .cloud-area {
       order: 1;
+      min-height: 60vh;
     }
-    .canvas-wrap {
-      aspect-ratio: 4 / 3;
-      min-height: 0;
+    .question-text {
+      max-width: calc(100% - var(--space-4) * 2);
+      font-size: 0.9375rem;
+    }
+    .actions {
+      top: var(--space-2);
+      right: var(--space-2);
     }
     .qr {
       max-width: 220px;
